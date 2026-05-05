@@ -286,7 +286,11 @@ class RunShellTool(BaseTool):
         super().__init__()
 
     async def _arun(self, command: str, timeout: int = 30) -> ToolResult:
-        timeout = min(timeout, 120)
+        # Trust the caller's requested timeout; cap at 30 min as a sanity ceiling.
+        # Long-running shell work (installs, doctor passes) legitimately exceeds
+        # the previous 120s cap, which silently turned slow-but-progressing work
+        # into a perceived timeout while the subprocess kept running.
+        timeout = min(timeout, 1800)
         try:
             result = await self._session.connector.run_bash_script(
                 command,
