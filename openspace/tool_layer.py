@@ -594,10 +594,22 @@ class OpenSpace:
 
             if cancelled_exc is None:
                 # Run execution analysis + evolution BEFORE building the return
-                # value, so evolved_skills is populated.
-                await self._maybe_analyze_execution(
-                    task_id, recording_dir, result
-                )
+                # value, so evolved_skills is populated. Bounded at 300s — a
+                # runaway analyzer/evolver loop will be cancelled here rather
+                # than silently hanging the caller (incident 2026-05-05).
+                try:
+                    await asyncio.wait_for(
+                        self._maybe_analyze_execution(
+                            task_id, recording_dir, result
+                        ),
+                        timeout=300,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Analyzer/evolver exceeded 300s bound for task %s; "
+                        "cancelled. Evolved skills (if any) may be incomplete.",
+                        task_id,
+                    )
 
                 # Trigger quality evolution periodically
                 await self._maybe_evolve_quality()
@@ -837,8 +849,10 @@ class OpenSpace:
                     })
 
         except Exception as e:
-            # Analysis failure must never break the main execution flow
-            logger.debug(f"Execution analysis skipped: {e}")
+            # Analysis failure must never break the main execution flow.
+            # Upgraded debug→warning so silent hangs / errors are visible at
+            # default log level (incident 2026-05-05).
+            logger.warning(f"Execution analysis skipped: {e}")
 
     async def _maybe_evolve_quality(self) -> None:
         """Trigger quality evolution based on global execution count.

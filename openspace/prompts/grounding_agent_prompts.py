@@ -28,6 +28,19 @@ class GroundingAgentPrompts:
             "- If you need results to decide next action, wait for next iteration"
         )
 
+        # Timeout handling (added 2026-05-05 after incident where the LLM
+        # re-invoked a state-mutating shell command after a perceived timeout
+        # while the original subprocess was still running).
+        sections.append(
+            "# On Tool Timeouts\n\n"
+            "When a tool returns a timeout result, the operation's outcome is "
+            "UNKNOWN — the underlying work may still be running.\n"
+            "- Do NOT call the same tool with the same arguments twice in this task.\n"
+            "- Treat the task as paused-pending-investigation, not failed-and-retry.\n"
+            "- Report the timeout to the user and stop. The user will decide whether "
+            "to investigate, kill orphaned work, or retry with adjusted parameters."
+        )
+
         # Tool Selection Tips (only mention backends that exist)
         tips: List[str] = []
         has_mcp = "mcp" in scope

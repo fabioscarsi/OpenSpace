@@ -11,6 +11,7 @@ work without any changes.
 import asyncio
 import os
 import platform
+import signal
 import tempfile
 import uuid
 from typing import Any, Optional, Dict
@@ -94,6 +95,31 @@ def _wrap_script_with_conda(script: str, conda_env: str | None) -> str:
             return script
 
 
+async def _kill_process_tree(proc: asyncio.subprocess.Process, timeout: int) -> None:
+    """Send SIGTERM (then SIGKILL on holdout) to a process group started with
+    start_new_session=True. Best-effort: silent on ProcessLookupError /
+    PermissionError because the process may already be gone or unreachable.
+    """
+    if proc.returncode is not None:
+        return
+    pid = proc.pid
+    logger.warning(
+        "Subprocess timeout after %ss; killing process tree (pid=%s)", timeout, pid
+    )
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError) as e:
+        logger.warning("SIGTERM to process group failed: %s", e)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+            await proc.wait()
+        except (ProcessLookupError, PermissionError) as e:
+            logger.warning("SIGKILL to process group failed: %s", e)
+
+
 class LocalShellConnector(BaseConnector[Any]):
     """
     Shell connector that runs scripts **locally** using asyncio subprocesses,
@@ -150,12 +176,15 @@ class LocalShellConnector(BaseConnector[Any]):
         cwd = working_dir or os.getcwd()
 
         try:
+            # start_new_session=True puts the child in a new process group so we
+            # can kill the whole tree on timeout (see TimeoutError handler below).
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=exec_env,
+                start_new_session=True,
             )
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
@@ -172,10 +201,13 @@ class LocalShellConnector(BaseConnector[Any]):
                 "returncode": returncode,
             }
         except asyncio.TimeoutError:
+            # Kill the entire process group so orphan subprocesses don't keep
+            # mutating state silently while the caller sees "timed out".
+            await _kill_process_tree(proc, timeout)
             return {
                 "status": "error",
-                "output": f"Execution timed out after {timeout} seconds",
-                "content": f"Execution timed out after {timeout} seconds",
+                "output": f"Execution timed out after {timeout} seconds (killed)",
+                "content": f"Execution timed out after {timeout} seconds (killed)",
                 "error": "",
                 "returncode": -1,
             }
@@ -204,12 +236,15 @@ class LocalShellConnector(BaseConnector[Any]):
         cwd = working_dir or os.getcwd()
 
         try:
+            # start_new_session=True puts the child in a new process group so we
+            # can kill the whole tree on timeout (see TimeoutError handler below).
             proc = await asyncio.create_subprocess_shell(
                 shell_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
                 env=exec_env,
+                start_new_session=True,
             )
             stdout_b, _ = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
@@ -225,10 +260,13 @@ class LocalShellConnector(BaseConnector[Any]):
                 "returncode": returncode,
             }
         except asyncio.TimeoutError:
+            # Kill the entire process group so orphan subprocesses don't keep
+            # mutating state silently while the caller sees "timed out".
+            await _kill_process_tree(proc, timeout)
             return {
                 "status": "error",
-                "output": f"Script execution timed out after {timeout} seconds",
-                "content": f"Script execution timed out after {timeout} seconds",
+                "output": f"Script execution timed out after {timeout} seconds (killed)",
+                "content": f"Script execution timed out after {timeout} seconds (killed)",
                 "error": "",
                 "returncode": -1,
             }
